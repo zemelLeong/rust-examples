@@ -42,8 +42,11 @@ use libp2p::{identity, NetworkBehaviour, PeerId};
 use log::info;
 use std::convert::TryInto;
 use std::error::Error;
+use std::fs::{write, File};
+use std::io::BufReader;
+use std::io::Read;
 use std::net::Ipv4Addr;
-use std::str::FromStr;
+use std::str::{from_utf8, FromStr};
 
 #[derive(Debug, Parser)]
 #[clap(name = "libp2p DCUtR client")]
@@ -285,10 +288,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 line = stdin.select_next_some() => {
                     if let Some(peer_id) = peer_id {
+                        let path = line.expect("Stdin not to close");
+
+                        let file = File::open(path.clone())?;
+                        let mut reader = BufReader::new(file);
+                        let mut buffer = Vec::new();
+                        reader.read_to_end(&mut buffer)?;
+                        let filename = {
+                            let path = path.replace(r"\", "/");
+                            path.rsplit_once("/").unwrap().1.to_string()
+                        };
+
+                        let sep = "|||".as_bytes();
+                        buffer.extend(sep);
+                        buffer.extend(filename.as_bytes());
+
                         swarm
                             .behaviour_mut()
                             .sendmsg
-                            .send(line.expect("Stdin not to close").as_bytes(), &peer_id)
+                            .send(buffer, &peer_id)
                     }
                 },
 
@@ -309,8 +327,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     SwarmEvent::Behaviour(Event::Dcutr(event)) => {
                         info!("{:?}", event)
                     }
-                    SwarmEvent::Behaviour(Event::Send(event)) => {
-                        println!("{:?}", event)
+                    SwarmEvent::Behaviour(Event::Send(libp2p_msg::Event{ peer, result })) => {
+                        println!("receive from: {:?}", peer);
+                        // println!("{:?}", result);
+                        let position = result.data
+                            .windows(3)
+                            .position(|window| matches!(window, b"|||"));
+                        if let Some(pos) = position {
+                            let (content, tmp) = result.data.split_at(pos);
+                            let (_, filename) = tmp.split_at(3);
+                            let filename = "libp2p-".to_string() + from_utf8(filename).unwrap();
+                            write(filename.clone(), content).unwrap();
+                            println!("============= {filename} 写入成功 =============");
+                        }
                     }
                     SwarmEvent::Behaviour(Event::Identify(event)) => {
                         info!("{:?}", event)

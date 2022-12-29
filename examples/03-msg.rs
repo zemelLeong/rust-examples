@@ -99,17 +99,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
-                SwarmEvent::Behaviour(event) => {
-                    match event {
-                        libp2p_msg::Event{peer,result} =>{
-                            match result {
-                                libp2p_msg::MsgContent{data}=>{
-                                    println!("recv:from->{:?}\n {:?}",peer,std::str::from_utf8(&data).unwrap());
-                                }
-                            }
+                SwarmEvent::Behaviour(libp2p_msg::Event{peer,result}) => {
+                    match result {
+                        libp2p_msg::MsgContent{data}=>{
+                            println!("recv:from->{:?}\n {:?}",peer,std::str::from_utf8(&data).unwrap());
                         }
-
-                    } ;
+                    }
                 },
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     println!("New connect {:?}", peer_id);
