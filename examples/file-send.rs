@@ -19,8 +19,11 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
+use std::time::Duration;
 
 use async_std::io;
+use async_std::sync::RwLock;
+use async_std::task;
 use clap::Parser;
 use futures::executor::block_on;
 use futures::future::FutureExt;
@@ -282,10 +285,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
+    let swarm = RwLock::new(swarm);
+
     block_on(async {
         loop {
             futures::select! {
-
                 line = stdin.select_next_some() => {
                     if let Some(peer_id) = peer_id {
                         let path = line.expect("Stdin not to close");
@@ -300,133 +304,147 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
 
                         let sep = "|||".as_bytes();
-                        buffer.extend(sep);
-                        buffer.extend(filename.as_bytes());
+                        println!("===============================");
+                        // 1024
+                        for idx in 1536..2048 {
+                            let mut buffer = buffer[..idx].to_vec();
+                            buffer.extend(sep);
+                            buffer.extend(filename.as_bytes());
 
-                        swarm
-                            .behaviour_mut()
-                            .sendmsg
-                            .send(buffer, &peer_id)
+                            let length = buffer.len();
+                            println!("发送长度为：{length} 的数据");
+                            let mut swarm = swarm.write().await;
+                            swarm
+                                .behaviour_mut()
+                                .sendmsg
+                                .send(buffer, &peer_id);
+                            task::sleep(Duration::from_millis(10000)).await;
+                            break;
+                        }
                     }
                 },
 
-
-
-                event = swarm.select_next_some() => match event{
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        info!("Listening on {:?}", address);
-                    }
-                    SwarmEvent::Behaviour(Event::Relay(client::Event::ReservationReqAccepted {
-                        ..
-                    })) => {
-                        info!("Relay accepted our reservation request.");
-                    }
-                    SwarmEvent::Behaviour(Event::Relay(event)) => {
-                        info!("{:?}", event)
-                    }
-                    SwarmEvent::Behaviour(Event::Dcutr(event)) => {
-                        info!("{:?}", event)
-                    }
-                    SwarmEvent::Behaviour(Event::Send(libp2p_msg::Event{ peer, result })) => {
-                        println!("receive from: {:?}", peer);
-                        // println!("{:?}", result);
-                        let position = result.data
-                            .windows(3)
-                            .position(|window| matches!(window, b"|||"));
-                        if let Some(pos) = position {
-                            let (content, tmp) = result.data.split_at(pos);
-                            let (_, filename) = tmp.split_at(3);
-                            let filename = "libp2p-".to_string() + from_utf8(filename).unwrap();
-                            write(filename.clone(), content).unwrap();
-                            println!("============= {filename} 写入成功 =============");
+                event = {
+                    let mut swarm = swarm.write().await;
+                    swarm.select_next_some()
+                } => {
+                    let mut swarm = swarm.write().await;
+                    match event {
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            info!("Listening on {:?}", address);
                         }
-                    }
-                    SwarmEvent::Behaviour(Event::Identify(event)) => {
-                        info!("{:?}", event)
-                    }
-                    SwarmEvent::ConnectionEstablished {
-                        peer_id, endpoint, ..
-                    } => {
-                        println!("Established connection to {:?} via {:?}", peer_id, endpoint);
-                        // swarm.behaviour_mut()
-                        //     .sendmsg
-                        //     .insert(&peer_id);
-
-                        let peers = swarm.connected_peers();
-                        for p in peers {
-                            println!("peer {}",p);
+                        SwarmEvent::Behaviour(Event::Relay(client::Event::ReservationReqAccepted {
+                            ..
+                        })) => {
+                            info!("Relay accepted our reservation request.");
                         }
-
-                    }
-                    SwarmEvent::Behaviour(Event::Rendezvous(rendezvous::client::Event::Registered {
-                        namespace,
-                        ttl,
-                        rendezvous_node,
-                    })) => {
-                        println!(
-                            "Registered for namespace '{}' at rendezvous point {} for the next {} seconds",
-                            namespace,
-                            rendezvous_node,
-                            ttl
-                        );
-                        swarm.behaviour_mut().has_registered = true;
-
-                        let behaviour = swarm.behaviour_mut();
-
-                        behaviour.rendezvous.discover(
-                            Some(rendezvous::Namespace::new(NAMESPACE.to_string()).unwrap()),
-                            None,
-                            None,
-                            rendezvous_point
-                        );
-
-                    }
-                    SwarmEvent::Behaviour(Event::Rendezvous(rendezvous::client::Event::Discovered {
-                        registrations,
-                        cookie: new_cookie,
-                        ..
-                    })) => {
-                        cookie.replace(new_cookie);
-
-                        for registration in registrations {
-                            for address in registration.record.addresses() {
-                                let peer = registration.record.peer_id();
-                                println!("Discovered peer {} at {}", peer, address);
-
-                                // let p2p_suffix = Protocol::P2p(*peer.as_ref());
-                                // let address_with_p2p =
-                                //     if !address.ends_with(&Multiaddr::empty().with(p2p_suffix.clone())) {
-                                //         address.clone().with(p2p_suffix)
-                                //     } else {
-                                //         address.clone()
-                                //     };
-
-                                //swarm.dial(address_with_p2p).unwrap()
-                                swarm
-                                    .dial(
-                                        opts.relay_address.clone()
-                                        .with(Protocol::P2pCircuit)
-                                        .with(Protocol::P2p(peer.into())),
-                                    ).unwrap();
-                                println!("Dial {}",opts.relay_address.clone()
-                                    .with(Protocol::P2pCircuit)
-                                    .with(Protocol::P2p(peer.into())) );
+                        SwarmEvent::Behaviour(Event::Relay(event)) => {
+                            info!("{:?}", event)
+                        }
+                        SwarmEvent::Behaviour(Event::Dcutr(event)) => {
+                            info!("{:?}", event)
+                        }
+                        SwarmEvent::Behaviour(Event::Send(libp2p_msg::Event{ peer, result })) => {
+                            println!("receive from: {:?}", peer);
+                            // println!("{:?}", result);
+                            let position = result.data
+                                .windows(3)
+                                .position(|window| matches!(window, b"|||"));
+                            if let Some(pos) = position {
+                                let (content, tmp) = result.data.split_at(pos);
+                                let (_, filename) = tmp.split_at(3);
+                                let filename = "libp2p-".to_string() + from_utf8(filename).unwrap();
+                                write(filename.clone(), content).unwrap();
+                                println!("============= {filename} 写入成功 =============");
                             }
                         }
+                        SwarmEvent::Behaviour(Event::Identify(event)) => {
+                            info!("{:?}", event)
+                        }
+                        SwarmEvent::ConnectionEstablished {
+                            peer_id, endpoint, ..
+                        } => {
+                            println!("Established connection to {:?} via {:?}", peer_id, endpoint);
+                            // swarm.behaviour_mut()
+                            //     .sendmsg
+                            //     .insert(&peer_id);
+
+                            let peers = swarm.connected_peers();
+                            for p in peers {
+                                println!("peer {}",p);
+                            }
+
+                        }
+                        SwarmEvent::Behaviour(Event::Rendezvous(rendezvous::client::Event::Registered {
+                            namespace,
+                            ttl,
+                            rendezvous_node,
+                        })) => {
+                            println!(
+                                "Registered for namespace '{}' at rendezvous point {} for the next {} seconds",
+                                namespace,
+                                rendezvous_node,
+                                ttl
+                            );
+                            swarm.behaviour_mut().has_registered = true;
+
+                            let behaviour = swarm.behaviour_mut();
+
+                            behaviour.rendezvous.discover(
+                                Some(rendezvous::Namespace::new(NAMESPACE.to_string()).unwrap()),
+                                None,
+                                None,
+                                rendezvous_point
+                            );
+
+                        }
+                        SwarmEvent::Behaviour(Event::Rendezvous(rendezvous::client::Event::Discovered {
+                            registrations,
+                            cookie: new_cookie,
+                            ..
+                        })) => {
+                            cookie.replace(new_cookie);
+
+                            for registration in registrations {
+                                for address in registration.record.addresses() {
+                                    let peer = registration.record.peer_id();
+                                    println!("Discovered peer {} at {}", peer, address);
+
+                                    // let p2p_suffix = Protocol::P2p(*peer.as_ref());
+                                    // let address_with_p2p =
+                                    //     if !address.ends_with(&Multiaddr::empty().with(p2p_suffix.clone())) {
+                                    //         address.clone().with(p2p_suffix)
+                                    //     } else {
+                                    //         address.clone()
+                                    //     };
+
+                                    //swarm.dial(address_with_p2p).unwrap()
+                                    swarm
+                                        .dial(
+                                            opts.relay_address.clone()
+                                            .with(Protocol::P2pCircuit)
+                                            .with(Protocol::P2p(peer.into())),
+                                        ).unwrap();
+                                    println!("Dial {}",opts.relay_address.clone()
+                                        .with(Protocol::P2pCircuit)
+                                        .with(Protocol::P2p(peer.into())) );
+                                }
+                            }
+                        }
+
+                        SwarmEvent::ConnectionClosed { peer_id,endpoint ,.. } => {
+                            println!("disconnect {:?} by {:?}", peer_id,endpoint);
+                            /*swarm.behaviour_mut()
+                            .sendmsg
+                            .remove(&peer_id);*/
+                        },
+
+
+                        SwarmEvent::OutgoingConnectionError { peer_id, error } => {
+                            info!("Outgoing connection error to {:?}: {:?}", peer_id, error);
+                        }
+                        _ => {}
                     }
-
-                    SwarmEvent::ConnectionClosed { peer_id,endpoint ,.. } => {
-                        println!("disconnect {:?} by {:?}", peer_id,endpoint);
-                        /*swarm.behaviour_mut()
-                        .sendmsg
-                        .remove(&peer_id);*/
-                    },
-
-
-                    SwarmEvent::OutgoingConnectionError { peer_id, error } => {
-                        info!("Outgoing connection error to {:?}: {:?}", peer_id, error);
-                    }
-                    _ => {}
                 }
             } //select
         } //loop
