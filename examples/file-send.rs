@@ -22,7 +22,6 @@
 use std::time::Duration;
 
 use async_std::io;
-use async_std::sync::RwLock;
 use async_std::task;
 use clap::Parser;
 use futures::executor::block_on;
@@ -34,16 +33,17 @@ use libp2p::core::transport::OrTransport;
 use libp2p::core::upgrade;
 use libp2p::dcutr;
 use libp2p::dns::DnsConfig;
-use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent, IdentifyInfo};
+use libp2p::identify::{
+    Behaviour as Identify, Config as IdentifyConfig, Event as IdentifyEvent, Info as IdentifyInfo,
+};
 use libp2p::noise;
 use libp2p::relay::v2::client::{self, Client};
 use libp2p::rendezvous;
-use libp2p::swarm::{SwarmBuilder, SwarmEvent};
-use libp2p::tcp::{GenTcpConfig, TcpTransport};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::tcp::{async_io::Transport as TcpTransport, Config as GenTcpConfig};
 use libp2p::Transport;
-use libp2p::{identity, NetworkBehaviour, PeerId};
+use libp2p::{identity, PeerId};
 use log::info;
-use std::convert::TryInto;
 use std::error::Error;
 use std::fs::{write, File};
 use std::io::BufReader;
@@ -120,10 +120,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         dcutr: dcutr::behaviour::Behaviour,
         sendmsg: libp2p_msg::Behaviour,
         rendezvous: rendezvous::client::Behaviour,
-
-        #[behaviour(ignore)]
-        #[allow(dead_code)]
-        has_registered: bool,
+        // #[behaviour(ignore)]
+        // #[allow(dead_code)]
+        // has_registered: bool,
     }
 
     #[derive(Debug)]
@@ -133,6 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Dcutr(dcutr::behaviour::Event),
         Send(libp2p_msg::Event),
         Rendezvous(rendezvous::client::Event),
+        Registered(bool),
     }
 
     impl From<IdentifyEvent> for Event {
@@ -164,6 +164,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    impl From<bool> for Event {
+        fn from(e: bool) -> Self {
+            Event::Registered(e)
+        }
+    }
+
     let behaviour = Behaviour {
         relay_client: client,
         identify: Identify::new(IdentifyConfig::new(
@@ -173,17 +179,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         dcutr: dcutr::behaviour::Behaviour::new(),
         sendmsg: libp2p_msg::Behaviour::new(),
         rendezvous: rendezvous::client::Behaviour::new(local_key.clone()),
-
-        has_registered: false,
+        // has_registered: false,
     };
 
     let mut cookie = None;
 
     let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
 
-    let mut swarm = SwarmBuilder::new(transport, behaviour, local_peer_id)
-        .dial_concurrency_factor(10_u8.try_into().unwrap())
-        .build();
+    let mut swarm = Swarm::with_threadpool_executor(transport, behaviour, local_peer_id);
 
     swarm
         .listen_on(
@@ -285,8 +288,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    let swarm = RwLock::new(swarm);
-
     block_on(async {
         loop {
             futures::select! {
@@ -306,29 +307,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let sep = "|||".as_bytes();
                         println!("===============================");
                         // 1024
-                        for idx in 1536..2048 {
+                        for idx in 1536..1539 {
                             let mut buffer = buffer[..idx].to_vec();
                             buffer.extend(sep);
                             buffer.extend(filename.as_bytes());
 
                             let length = buffer.len();
                             println!("发送长度为：{length} 的数据");
-                            let mut swarm = swarm.write().await;
                             swarm
                                 .behaviour_mut()
                                 .sendmsg
                                 .send(buffer, &peer_id);
-                            task::sleep(Duration::from_millis(10000)).await;
-                            break;
+                            task::sleep(Duration::from_millis(3000)).await;
+                            // break;
                         }
                     }
                 },
 
-                event = {
-                    let mut swarm = swarm.write().await;
-                    swarm.select_next_some()
-                } => {
-                    let mut swarm = swarm.write().await;
+                event = swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!("Listening on {:?}", address);
@@ -386,7 +382,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 rendezvous_node,
                                 ttl
                             );
-                            swarm.behaviour_mut().has_registered = true;
+                            // swarm.behaviour_mut().has_registered = true;
 
                             let behaviour = swarm.behaviour_mut();
 
